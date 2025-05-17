@@ -2,61 +2,96 @@ import React, { useRef, useState } from "react";
 import MonacoEditor from "@monaco-editor/react";
 import axios from "axios";
 
-const prefix = `import java.io.*;\nimport java.util.*;\n\npublic class Main {\n\n    public static void main(String[] args) {`;
-const suffix = `\n    }\n}`;
-const defaultUserCode = `\n        Scanner sc = new Scanner(System.in);\n        // your code here`;
+const fullInitialCode = `import java.io.*;
+import java.util.*;
+
+public class Main {
+
+    public static void main(String[] args) {
+
+        // --- START EDITABLE BLOCK 1 ---
+        Scanner sc = new Scanner(System.in);
+        // your code here - block 1
+
+        // --- FREEZE BLOCK 1 ---
+        System.out.println("Checkpoint 1");
+
+        // --- START EDITABLE BLOCK 2 ---
+        // your code here - block 2
+        int x = sc.nextInt();
+
+        // --- FREEZE BLOCK 2 ---
+        System.out.println("Checkpoint 2");
+
+        // --- START EDITABLE BLOCK 3 ---
+        // your code here - block 3
+
+        // --- FREEZE BLOCK 3 ---
+        System.out.println("Checkpoint 3");
+    }
+}`;
 
 function App() {
   const editorRef = useRef(null);
   const [input, setInput] = useState("");
   const [output, setOutput] = useState("");
+  const [decorations, setDecorations] = useState([]);
 
-  const fullInitialCode = prefix + defaultUserCode + suffix;
+  // Load code from localStorage or fallback to default
+  const initialCode = localStorage.getItem("dynamicCode") || fullInitialCode;
 
-  const prefixLines = prefix.split("\n").length;
-  const suffixLines = suffix.split("\n").length-1;
-  // const editableStartLine = prefixLines + 1;
+  const getEditableLines = (model) => {
+    const editableLines = new Set();
+    const lineCount = model.getLineCount();
+    let inEditable = false;
+
+    for (let i = 1; i <= lineCount; i++) {
+      const lineText = model.getLineContent(i).trim();
+      if (lineText.includes("// --- START EDITABLE BLOCK")) {
+        inEditable = true;
+        editableLines.add(i);
+        continue;
+      }
+      if (lineText.includes("// --- FREEZE BLOCK")) {
+        inEditable = false;
+      }
+      if (inEditable) {
+        editableLines.add(i);
+      }
+    }
+    return editableLines;
+  };
+
+  const applyDecorations = (editor, monaco, editableLines) => {
+    const model = editor.getModel();
+    const lineCount = model.getLineCount();
+    const newDecorations = [];
+
+    for (let i = 1; i <= lineCount; i++) {
+      if (!editableLines.has(i)) {
+        newDecorations.push({
+          range: new monaco.Range(i, 1, i, 1),
+          options: {
+            isWholeLine: true,
+            className: "read-only-line",
+          },
+        });
+      }
+    }
+    setDecorations(editor.deltaDecorations(decorations, newDecorations));
+  };
 
   const handleEditorDidMount = (editor, monaco) => {
     editorRef.current = editor;
+    const model = editor.getModel();
+    let editableLines = getEditableLines(model);
+    applyDecorations(editor, monaco, editableLines);
 
-    // Initial decorations
-    const totalLines = editor.getModel().getLineCount();
-    const suffixStartLine = totalLines - suffixLines + 1;
+    const isEditableLine = (line) => editableLines.has(line);
 
-    const decorations = [];
-
-    // Read-only: prefix lines
-    decorations.push({
-      range: new monaco.Range(1, 1, prefixLines, 1),
-      options: {
-        isWholeLine: true,
-        className: "read-only-line",
-        linesDecorationsClassName: "read-only-line-decoration",
-      },
-    });
-
-    // Read-only: suffix lines
-    decorations.push({
-      range: new monaco.Range(suffixStartLine, 1, totalLines, 1),
-      options: {
-        isWholeLine: true,
-        className: "read-only-line",
-        linesDecorationsClassName: "read-only-line-decoration",
-      },
-    });
-
-    editor.deltaDecorations([], decorations);
-
-    // Block typing in read-only areas
     editor.onKeyDown((e) => {
       const pos = editor.getPosition();
       const line = pos.lineNumber;
-      const column = pos.column;
-      const total = editor.getModel().getLineCount();
-      const suffixStart = total - suffixLines + 1;
-      const editableStartLine = prefixLines + 1;
-    
       const isNavKey = [
         monaco.KeyCode.LeftArrow,
         monaco.KeyCode.RightArrow,
@@ -65,58 +100,16 @@ function App() {
         monaco.KeyCode.PageDown,
         monaco.KeyCode.PageUp,
       ].includes(e.keyCode);
-    
-      // Block typing and deleting in prefix/suffix
-      if (line <= prefixLines || line >= suffixStart) {
-        if (!isNavKey) {
-          e.preventDefault();
-          e.stopPropagation();
-        }
-      }
-    
-      // Specifically block Backspace on the first editable line if trying to move to prefix
-      if (
-        e.keyCode === monaco.KeyCode.Backspace &&
-        line === editableStartLine &&
-        column <= 1
-      ) {
+
+      if (!isEditableLine(line) && !isNavKey) {
         e.preventDefault();
         e.stopPropagation();
       }
     });
-    
 
-    // Revert changes to read-only areas
-    let isApplyingEdits = false; // flag to prevent recursive edits
-
-    editor.onDidChangeModelContent((e) => {
-      if (isApplyingEdits) return; // prevent recursive calls
-
-      const model = editor.getModel();
-      const total = model.getLineCount();
-      const suffixStart = total - suffixLines + 1; // fix suffixStart calculation
-
-      e.changes.forEach((change) => {
-        const { range } = change;
-
-        if (range.startLineNumber <= prefixLines) {
-          const originalPrefix = prefix
-            .split("\n")
-            .slice(range.startLineNumber - 1, range.endLineNumber)
-            .join("\n");
-          isApplyingEdits = true;
-          editor.executeEdits(null, [{ range, text: originalPrefix }]);
-          isApplyingEdits = false;
-        } else if (range.startLineNumber >= suffixStart) {
-          const suffixArray = suffix.split("\n");
-          const start = range.startLineNumber - suffixStart;
-          const end = range.endLineNumber - suffixStart;
-          const originalSuffix = suffixArray.slice(start, end + 1).join("\n");
-          isApplyingEdits = true;
-          editor.executeEdits(null, [{ range, text: originalSuffix }]);
-          isApplyingEdits = false;
-        }
-      });
+    editor.onDidChangeModelContent(() => {
+      editableLines = getEditableLines(model);
+      applyDecorations(editor, monaco, editableLines);
     });
   };
 
@@ -125,10 +118,7 @@ function App() {
     try {
       const response = await axios.post(
         "http://localhost:8080/run-java",
-        JSON.stringify({
-          code: fullCode,
-          input,
-        }),
+        JSON.stringify({ code: fullCode, input }),
         {
           headers: { "Content-Type": "application/json" },
         }
@@ -136,11 +126,7 @@ function App() {
       setOutput(response.data.stdout);
     } catch (error) {
       console.error("Error running the code:", error);
-      if (error.response?.data) {
-        setOutput(`Error: ${error.response.data}`);
-      } else {
-        setOutput("Error running the code.");
-      }
+      setOutput("Error running the code.");
     }
   };
 
@@ -148,47 +134,34 @@ function App() {
     <div className="App">
       <h1>Java Code Editor</h1>
       <MonacoEditor
-        height="400px"
-        width="1400px"
+        height="500px"
         language="java"
-        value={fullInitialCode}
+        value={initialCode}
         onMount={handleEditorDidMount}
         theme="vs-dark"
         options={{
-          readOnly: false,
           scrollBeyondLastLine: false,
           minimap: { enabled: false },
         }}
       />
-      <style>
-        {`
-          .editable-line {
-            background-color: rgba(178, 46, 23, 0.1);
-          }
-          .read-only-line {
-            background-color: rgba(200, 200, 200, 0.2);
-            color: #666;
-          }
-          .read-only-line-decoration {
-            background-color: rgba(200, 200, 200, 0.2);
-          }
-        `}
-      </style>
-      <div>
-        <h3>Input:</h3>
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          rows={5}
-          cols={60}
-          placeholder="Enter input for the program here"
-        />
-      </div>
+      {/* Optional CSS for readonly lines */}
+      {/* <style>{`
+        .read-only-line {
+          background-color: rgba(200, 200, 200, 0.1);
+          color: #888;
+        }
+      `}</style> */}
+      <h3>Input:</h3>
+      <textarea
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        rows={5}
+        cols={60}
+      />
+      <br />
       <button onClick={handleRunCode}>Run Code</button>
-      <div>
-        <h3>Output:</h3>
-        <pre>{output}</pre>
-      </div>
+      <h3>Output:</h3>
+      <pre>{output}</pre>
     </div>
   );
 }
